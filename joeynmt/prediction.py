@@ -37,6 +37,9 @@ from joeynmt.search import search
 from joeynmt.tokenizers import build_tokenizer
 from joeynmt.vocabulary import build_vocab
 
+from datasets import load_dataset
+import os
+import re
 logger = logging.getLogger(__name__)
 
 
@@ -536,8 +539,43 @@ def translate(
     model_checkpoint = load_checkpoint(ckpt, device=device)
     model.load_state_dict(model_checkpoint["model_state"])
 
+    # Get the encoder and decoder states
+    encoder_states = model.encoder.state_dict()
+    decoder_states = model.decoder.state_dict()
+
+
+    # show encoder state
+    for name, param in encoder_states.items():
+        logger.info(f"Encoder: {name}, {param.size()}")
+
+    for name, param in decoder_states.items():
+        logger.info(f"Decoder: {name}, {param.size()}")
+
+
+    # we only need 2 layer of decoder delete other layers 
+    # delete the first layer
+    
+    torch.save(decoder_states, os.path.join("/tmp", "decoder_states_teacher.pt"))
+
+    pattern = re.compile(r"layers.(3|4|5|6)\..*")
+
+    logger.info("Deleting layers 3, 4, 5, 6 from decoder")
+    # Delete all keys that match the pattern
+    for name in list(decoder_states.keys()):
+        if pattern.match(name):
+            del decoder_states[name]
+            logger.info(f"Decoder: {name} deleted")
+
+    for name, param in decoder_states.items():
+        logger.info(f"Student Decoder: {name}, {param.size()}")
+
+    # Save the encoder and decoder states to separate files
+    # torch.save(encoder_states, os.path.join("/tmp", "encoder_states.pt"))
+    # torch.save(decoder_states, os.path.join("/tmp", "decoder_states_student.pt"))
+
     if device.type == "cuda":
         model.to(device)
+
 
     tokenizer = build_tokenizer(cfg["data"])
     sequence_encoder = {
@@ -560,70 +598,97 @@ def translate(
     n_best = test_cfg.get("n_best", 1)
     beam_size = test_cfg.get("beam_size", 1)
     return_prob = test_cfg.get("return_prob", "none")
-    if not sys.stdin.isatty():  # pylint: disable=too-many-nested-blocks
-        # input stream given
-        for i, line in enumerate(sys.stdin.readlines()):
-            if not line.strip():
-                # skip empty lines and print warning
-                logger.warning("The sentence in line %d is empty. Skip to load.", i)
-                continue
-            test_data.set_item(line.rstrip())
+
+    tatoeba_kwargs = {
+        "path": "get_tatoeba.py",
+        "name": "de-en",
+        "ignore_verifications": True,
+        # edit
+        # "cache_dir": "/content/drive/MyDrive/.cache/huggingface"
+        "cache_dir": "/content/drive/MyDrive/thesis/joeynmt/.cache/huggingface"
+    }
+
+    # tatoeba_dev = load_dataset(split="train[:1000]", **tatoeba_kwargs)
+    # tatoeba_test = load_dataset(split="train[1000:2000]", **tatoeba_kwargs)
+    tatoeba_train = load_dataset(split="train[:3]", **tatoeba_kwargs)
+
+    for line in tatoeba_train['translation']:
+        test_data.set_item(line['de'].rstrip())
+        all_hypotheses = []
         all_hypotheses, tokens, scores = _translate_data(test_data, test_cfg)
         assert len(all_hypotheses) == len(test_data) * n_best
+        print(f"reference (de):      {line['de']}")
+        print(f"reference (en):      {line['en']}")
+        print(f"translate:           {all_hypotheses[-1]}")
+        # for hyp in all_hypotheses:
+        #     print(hyp)
 
-        if output_path is not None:
-            # write to outputfile if given
-            out_file = Path(output_path).expanduser()
+        
 
-            if n_best > 1:
-                for n in range(n_best):
-                    write_list_to_file(
-                        out_file.parent / f"{out_file.stem}-{n}.{out_file.suffix}",
-                        [
-                            all_hypotheses[i]
-                            for i in range(n, len(all_hypotheses), n_best)
-                        ],
-                    )
-            else:
-                write_list_to_file(out_file, all_hypotheses)
+    # if not sys.stdin.isatty():  # pylint: disable=too-many-nested-blocks
+    #     # input stream given
+    #     for i, line in enumerate(sys.stdin.readlines()):
+    #         if not line.strip():
+    #             # skip empty lines and print warning
+    #             logger.warning("The sentence in line %d is empty. Skip to load.", i)
+    #             continue
+    #         test_data.set_item(line.rstrip())
+    #     all_hypotheses, tokens, scores = _translate_data(test_data, test_cfg)
+    #     assert len(all_hypotheses) == len(test_data) * n_best
 
-            logger.info("Translations saved to: %s.", out_file)
+    #     if output_path is not None:
+    #         # write to outputfile if given
+    #         out_file = Path(output_path).expanduser()
 
-        else:
-            # print to stdout
-            for hyp in all_hypotheses:
-                print(hyp)
+    #         if n_best > 1:
+    #             for n in range(n_best):
+    #                 write_list_to_file(
+    #                     out_file.parent / f"{out_file.stem}-{n}.{out_file.suffix}",
+    #                     [
+    #                         all_hypotheses[i]
+    #                         for i in range(n, len(all_hypotheses), n_best)
+    #                     ],
+    #                 )
+    #         else:
+    #             write_list_to_file(out_file, all_hypotheses)
 
-    else:
-        # enter interactive mode
-        test_cfg["batch_size"] = 1  # CAUTION: this will raise an error if n_gpus > 1
-        test_cfg["batch_type"] = "sentence"
-        np.set_printoptions(linewidth=sys.maxsize)  # for printing scores in stdout
-        while True:
-            try:
-                src_input = input("\nPlease enter a source sentence:\n")
-                if not src_input.strip():
-                    break
+    #         logger.info("Translations saved to: %s.", out_file)
 
-                # every line has to be made into dataset
-                test_data.set_item(src_input.rstrip())
-                hypotheses, tokens, scores = _translate_data(test_data, test_cfg)
+    #     else:
+    #         # print to stdout
+    #         for hyp in all_hypotheses:
+    #             print(hyp)
 
-                print("JoeyNMT:")
-                for i, (hyp, token,
-                        score) in enumerate(zip_longest(hypotheses, tokens, scores)):
-                    assert hyp is not None, (i, hyp, token, score)
-                    print(f"#{i + 1}: {hyp}")
-                    if return_prob in ["hyp"]:
-                        if beam_size > 1:  # beam search: sequence-level scores
-                            print(f"\ttokens: {token}\n\tsequence score: {score[0]}")
-                        else:  # greedy: token-level scores
-                            assert len(token) == len(score), (token, score)
-                            print(f"\ttokens: {token}\n\tscores: {score}")
+    # else:
+    #     # enter interactive mode
+    #     test_cfg["batch_size"] = 1  # CAUTION: this will raise an error if n_gpus > 1
+    #     test_cfg["batch_type"] = "sentence"
+    #     np.set_printoptions(linewidth=sys.maxsize)  # for printing scores in stdout
+    #     while True:
+    #         try:
+    #             src_input = input("\nPlease enter a source sentence:\n")
+    #             if not src_input.strip():
+    #                 break
 
-                # reset cache
-                test_data.cache = {}
+    #             # every line has to be made into dataset
+    #             test_data.set_item(src_input.rstrip())
+    #             hypotheses, tokens, scores = _translate_data(test_data, test_cfg)
 
-            except (KeyboardInterrupt, EOFError):
-                print("\nBye.")
-                break
+    #             print("JoeyNMT:")
+    #             for i, (hyp, token,
+    #                     score) in enumerate(zip_longest(hypotheses, tokens, scores)):
+    #                 assert hyp is not None, (i, hyp, token, score)
+    #                 print(f"#{i + 1}: {hyp}")
+    #                 if return_prob in ["hyp"]:
+    #                     if beam_size > 1:  # beam search: sequence-level scores
+    #                         print(f"\ttokens: {token}\n\tsequence score: {score[0]}")
+    #                     else:  # greedy: token-level scores
+    #                         assert len(token) == len(score), (token, score)
+    #                         print(f"\ttokens: {token}\n\tscores: {score}")
+
+    #             # reset cache
+    #             test_data.cache = {}
+
+    #         except (KeyboardInterrupt, EOFError):
+    #             print("\nBye.")
+    #             break
