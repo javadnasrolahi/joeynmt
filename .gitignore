@@ -7,3 +7,6 @@ docs/build/*
 __pycache__
 *.pyc
 jnmt
+
+myenv1
+myenv2
